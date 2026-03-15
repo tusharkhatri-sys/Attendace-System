@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
+  <rect width="192" height="192" rx="32" fill="#2563eb"/>
+  <path d="M96 28c-6 0-11 2-15 5L50 55c-4 3-6 8-6 13v56c0 5 2 10 6 13l31 22c4 3 9 5 15 5s11-2 15-5l31-22c4-3 6-8 6-13V68c0-5-2-10-6-13L111 33c-4-3-9-5-15-5z" fill="none" stroke="#fff" stroke-width="6"/>
+  <circle cx="96" cy="80" r="18" fill="none" stroke="#f59e0b" stroke-width="5"/>
+  <path d="M72 120c0-13 11-24 24-24s24 11 24 24" fill="none" stroke="#f59e0b" stroke-width="5" stroke-linecap="round"/>
+  <text x="96" y="165" text-anchor="middle" font-family="Arial" font-weight="800" font-size="18" fill="#fff">DA</text>
+</svg>
