@@ -20,10 +20,12 @@ export default function AttendantDashboard({ attendantSession, setAttendantSessi
   const [attendanceLogs, setAttendanceLogs] = useState([]);
   const [studentsDb, setStudentsDb] = useState([]);
   const [cameraActive, setCameraActive] = useState(false);
+  const [entryType, setEntryType] = useState('IN'); // 'IN' or 'OUT'
 
   // Scan timeout
-  const [scanCountdown, setScanCountdown] = useState(null); // null = not scanning, number = seconds left
-  const [scanResult, setScanResult] = useState(null); // 'timeout' | null
+  const [scanCountdown, setScanCountdown] = useState(null);
+  const [scanResult, setScanResult] = useState(null); // 'timeout' | 'success' | null
+  const [lastRecognized, setLastRecognized] = useState(''); // name of last recognized person
 
   // Student management
   const [registeredStudents, setRegisteredStudents] = useState([]);
@@ -49,11 +51,14 @@ export default function AttendantDashboard({ attendantSession, setAttendantSessi
   useEffect(() => {
     if (modelsLoaded) {
       fetchRegisteredStudents();
-      if (activeTab === 'attendance') fetchStudentsDB();
+      if (activeTab === 'attendance') {
+        fetchStudentsDB();
+        fetchTodayAttendance();
+      }
     }
     stopVideo();
     cleanup();
-  }, [activeTab, modelsLoaded]);
+  }, [activeTab, modelsLoaded, entryType]);
 
   const cleanup = () => {
     if (scanIntervalRef.current) clearInterval(scanIntervalRef.current);
@@ -84,7 +89,10 @@ export default function AttendantDashboard({ attendantSession, setAttendantSessi
   const fetchStudentsDB = async () => {
     try {
       const { data, error } = await supabase
-        .from('students').select('*').eq('org_id', attendantSession.org_id);
+        .from('students')
+        .select('*')
+        .eq('org_id', attendantSession.org_id)
+        .eq('trade', attendantSession.trade || 'General');
       if (error) throw error;
       if (data && data.length > 0) {
         const matchers = data.map(s => {
@@ -105,13 +113,41 @@ export default function AttendantDashboard({ attendantSession, setAttendantSessi
   const fetchRegisteredStudents = async () => {
     try {
       const { data, error } = await supabase
-        .from('students').select('id, name, created_at, photo_url')
+        .from('students')
+        .select('id, name, created_at, photo_url, trade')
         .eq('org_id', attendantSession.org_id)
+        .eq('trade', attendantSession.trade || 'General')
         .order('created_at', { ascending: false });
       if (error) throw error;
       setRegisteredStudents(data || []);
     } catch (err) {
       console.error('Error fetching registered students:', err);
+    }
+  };
+
+  const fetchTodayAttendance = async () => {
+    try {
+      const today = new Date().toISOString().split('T')[0];
+      const { data, error } = await supabase
+        .from('attendance_records')
+        .select('student_id, person_name, created_at, entry_type')
+        .eq('org_id', attendantSession.org_id)
+        .eq('entry_type', entryType)
+        .gte('created_at', today + 'T00:00:00')
+        .lte('created_at', today + 'T23:59:59')
+        .order('created_at', { ascending: false });
+      
+      if (error) throw error;
+      
+      const logs = (data || []).map(r => ({
+        student_id: r.student_id,
+        name: r.person_name,
+        time: new Date(r.created_at).toLocaleTimeString(),
+        status: 'Present'
+      }));
+      setAttendanceLogs(logs);
+    } catch (err) {
+      console.error('Error fetching today attendance:', err);
     }
   };
 
@@ -270,6 +306,7 @@ export default function AttendantDashboard({ attendantSession, setAttendantSessi
         org_id: attendantSession.org_id,
         registered_by: attendantSession.id,
         name: newStudentName.trim(),
+        trade: attendantSession.trade || 'General',
         face_descriptor: descriptorArray,
         photo_url: photoDataUrl
       }]);
@@ -288,17 +325,19 @@ export default function AttendantDashboard({ attendantSession, setAttendantSessi
   };
 
   /* ========== ATTENDANCE WITH 10s TIMEOUT ========== */
+  const loggedStudentsRef = useRef(new Set());
+
   const startAttendanceScan = () => {
     if (studentsDb.length === 0) return;
     
     setScanResult(null);
     setScanCountdown(10);
+    loggedStudentsRef.current = new Set(); // reset per scan session
     
     const displaySize = { width: videoRef.current.videoWidth, height: videoRef.current.videoHeight };
     if (canvasRef.current) faceapi.matchDimensions(canvasRef.current, displaySize);
     
     const faceMatcher = new faceapi.FaceMatcher(studentsDb, 0.6);
-    let foundFace = false;
 
     // Countdown timer
     let secondsLeft = 10;
@@ -312,15 +351,14 @@ export default function AttendantDashboard({ attendantSession, setAttendantSessi
 
     // Timeout after 10 seconds
     timeoutRef.current = setTimeout(() => {
-      if (!foundFace) {
-        clearInterval(scanIntervalRef.current);
-        if (canvasRef.current) {
-          const ctx = canvasRef.current.getContext('2d');
-          ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-        }
-        setScanResult('timeout');
-        setScanCountdown(null);
+      clearInterval(scanIntervalRef.current);
+      clearInterval(countdownRef.current);
+      if (canvasRef.current) {
+        const ctx = canvasRef.current.getContext('2d');
+        ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
       }
+      setScanResult('timeout');
+      setScanCountdown(null);
     }, 10000);
 
     // Scan loop
@@ -337,7 +375,7 @@ export default function AttendantDashboard({ attendantSession, setAttendantSessi
           const ctx = canvasRef.current.getContext('2d');
           ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
 
-          resized.forEach((det) => {
+          for (const det of resized) {
             const result = faceMatcher.findBestMatch(det.descriptor);
             const box = det.detection.box;
             const isKnown = result.label !== 'unknown';
@@ -347,19 +385,48 @@ export default function AttendantDashboard({ attendantSession, setAttendantSessi
             if (isKnown) {
               try {
                 const info = JSON.parse(result.label);
-                labelText = info.name;
-                foundFace = true;
-                markAttendance(info);
-                // Clear timeout since we found someone
-                clearTimeout(timeoutRef.current);
-              } catch(e) {}
+                
+                // Check if already marked today
+                const isAlreadyMarked = attendanceLogs.some(log => log.student_id === info.id);
+                
+                if (isAlreadyMarked) {
+                  labelText = `${info.name} (Today Already Marked)`;
+                } else {
+                  labelText = info.name;
+                  
+                  // Only mark attendance once per student per scan session
+                  if (!loggedStudentsRef.current.has(info.id)) {
+                    loggedStudentsRef.current.add(info.id);
+                    setLastRecognized(info.name);
+                    markAttendance(info);
+                    // Stop scanning
+                    clearInterval(scanIntervalRef.current);
+                    clearTimeout(timeoutRef.current);
+                    clearInterval(countdownRef.current);
+                    setScanCountdown(null);
+                    // Show success overlay after brief green box
+                    setTimeout(() => {
+                      if (canvasRef.current) {
+                        const ctx = canvasRef.current.getContext('2d');
+                        ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+                      }
+                      setScanResult('success');
+                    }, 1200);
+                  }
+                }
+              } catch(e) {
+                labelText = result.label; // fallback: use raw label
+              }
             }
 
-            const drawBox = new faceapi.draw.DrawBox(box, { label: labelText, boxColor: color });
+            const boxColor = labelText.includes('Today Already Marked') ? '#2563eb' : color;
+            const drawBox = new faceapi.draw.DrawBox(box, { label: labelText, boxColor: boxColor });
             drawBox.draw(canvasRef.current);
-          });
+          }
         }
-      } catch (err) { /* continue */ }
+      } catch (err) { 
+        console.error('Scan error:', err);
+      }
     }, 1200);
   };
 
@@ -377,18 +444,36 @@ export default function AttendantDashboard({ attendantSession, setAttendantSessi
   };
 
   const markAttendance = async (studentInfo) => {
+    // Add to UI logs
     setAttendanceLogs(prev => {
       if (prev.some(log => log.student_id === studentInfo.id)) return prev;
-      const newLog = {
+      return [{
         student_id: studentInfo.id, name: studentInfo.name,
         time: new Date().toLocaleTimeString(), status: 'Present'
-      };
-      supabase.from('attendance_records').insert([{
-        student_id: studentInfo.id, attendant_id: attendantSession.id,
-        org_id: attendantSession.org_id, person_name: studentInfo.name, status: 'Present'
-      }]).catch(err => console.error("Sync error:", err));
-      return [newLog, ...prev];
+      }, ...prev];
     });
+
+    // Save to database
+    try {
+      const { data, error } = await supabase.from('attendance_records').insert([{
+        student_id: studentInfo.id, 
+        attendant_id: attendantSession.id,
+        org_id: attendantSession.org_id, 
+        person_name: studentInfo.name, 
+        entry_type: entryType,
+        status: 'Present'
+      }]).select();
+      
+      if (error) {
+        console.error('❌ Attendance DB save FAILED:', error.message, error.details, error.hint);
+        alert('⚠️ Attendance record failed to save: ' + error.message);
+      } else {
+        console.log('✅ Attendance saved:', data);
+      }
+    } catch (err) {
+      console.error('❌ Attendance save exception:', err);
+      alert('⚠️ Database error: ' + err.message);
+    }
   };
 
   /* ========== STUDENT MANAGEMENT ========== */
@@ -438,7 +523,7 @@ export default function AttendantDashboard({ attendantSession, setAttendantSessi
           <div className="govt-badge"><Shield size={28} /></div>
           <div>
             <h1>Dost Attend</h1>
-            <p>Biometric Attendance System — ID: <strong>{attendantSession?.unique_id}</strong></p>
+            <p>Biometric Portal — ID: <strong>{attendantSession?.unique_id}</strong> | Trade: <span className="status-pill present" style={{ fontSize: '0.75rem' }}>{attendantSession?.trade}</span></p>
           </div>
         </div>
         <button className="btn-logout" onClick={handleLogout}>
@@ -554,10 +639,16 @@ export default function AttendantDashboard({ attendantSession, setAttendantSessi
           <div className="camera-panel glass-panel">
             <div className="panel-header">
               <h2>📷 Live Biometric Scan</h2>
-              {cameraActive && scanCountdown !== null && (
-                <span className="countdown-badge">{scanCountdown}s</span>
-              )}
-              {cameraActive && <span className="live-badge">● LIVE</span>}
+              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                <div className="entry-toggle">
+                  <button className={`toggle-btn ${entryType === 'IN' ? 'active' : ''}`} onClick={() => setEntryType('IN')}>IN</button>
+                  <button className={`toggle-btn ${entryType === 'OUT' ? 'active' : ''}`} onClick={() => setEntryType('OUT')}>OUT</button>
+                </div>
+                {cameraActive && scanCountdown !== null && (
+                  <span className="countdown-badge">{scanCountdown}s</span>
+                )}
+                {cameraActive && <span className="live-badge">● LIVE</span>}
+              </div>
             </div>
             
             <div className="camera-viewport">
@@ -574,12 +665,23 @@ export default function AttendantDashboard({ attendantSession, setAttendantSessi
               )}
               {/* Timeout overlay */}
               {scanResult === 'timeout' && (
-                <div className="camera-overlay" style={{ background: 'rgba(12,26,46,0.92)' }}>
-                  <AlertTriangle size={48} color="#e8a838" />
-                  <p style={{ color: 'var(--accent)', fontWeight: '700', fontSize: '1.1rem' }}>No face recognized in 10 seconds</p>
-                  <p style={{ fontSize: '0.85rem' }}>Please ensure the person is registered & clearly visible</p>
+                <div className="camera-overlay" style={{ background: 'rgba(30,41,59,0.92)' }}>
+                  <AlertTriangle size={48} color="#d97706" />
+                  <p style={{ color: '#d97706', fontWeight: '700', fontSize: '1.1rem' }}>No face recognized in 10 seconds</p>
+                  <p style={{ fontSize: '0.85rem' }}>Ensure the person is registered & clearly visible</p>
                   <button className="btn btn-primary" onClick={retryScan} style={{ marginTop: '0.5rem' }}>
                     <RefreshCw size={18} /> Scan Again
+                  </button>
+                </div>
+              )}
+              {/* Success overlay */}
+              {scanResult === 'success' && (
+                <div className="camera-overlay" style={{ background: 'rgba(30,41,59,0.92)' }}>
+                  <CheckCircle size={56} color="#16a34a" />
+                  <p style={{ color: '#16a34a', fontWeight: '800', fontSize: '1.2rem' }}>✅ {lastRecognized}</p>
+                  <p style={{ fontSize: '0.9rem', color: '#94a3b8' }}>Attendance marked successfully!</p>
+                  <button className="btn btn-primary" onClick={retryScan} style={{ marginTop: '0.75rem' }}>
+                    <ScanFace size={18} /> Scan Next Person
                   </button>
                 </div>
               )}
@@ -595,8 +697,10 @@ export default function AttendantDashboard({ attendantSession, setAttendantSessi
               <div className="scan-info">
                 {studentsDb.length === 0 ? (
                   <div className="status-msg error">⚠️ No students registered. Register students first.</div>
-                ) : scanResult !== 'timeout' ? (
-                  <div className="status-msg success">🔍 Scanning {studentsDb.length} profiles... Auto-timeout in {scanCountdown || 0}s</div>
+                ) : scanResult === 'success' ? (
+                  <div className="status-msg success">✅ Attendance marked for {lastRecognized}. Click "Scan Next" for another.</div>
+                ) : scanResult !== 'timeout' && scanCountdown !== null ? (
+                  <div className="status-msg success">🔍 Scanning {studentsDb.length} profiles... {scanCountdown}s remaining</div>
                 ) : null}
               </div>
             )}
@@ -605,7 +709,7 @@ export default function AttendantDashboard({ attendantSession, setAttendantSessi
           {/* Logs panel */}
           <div className="logs-panel glass-panel">
             <div className="panel-header">
-              <h2><ClipboardList size={20} /> Today's Attendance</h2>
+              <h2><ClipboardList size={20} /> Today's {entryType} Attendance</h2>
               <span className="count-badge">{attendanceLogs.length}</span>
             </div>
             <div className="logs-list">
@@ -666,8 +770,11 @@ export default function AttendantDashboard({ attendantSession, setAttendantSessi
                           <div style={{ width: '42px', height: '42px', borderRadius: '10px', background: 'var(--surface-border)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-light)', fontSize: '1.1rem' }}>👤</div>
                         )}
                         <div className="student-info">
-                          <h4>{student.name}</h4>
-                          <span>{new Date(student.created_at).toLocaleDateString()}</span>
+                          <h4 style={{ marginBottom: '0.1rem' }}>{student.name}</h4>
+                          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                            <span className="status-pill present" style={{ fontSize: '0.65rem', padding: '0.05rem 0.4rem' }}>{student.trade}</span>
+                            <span style={{ fontSize: '0.75rem', color: 'var(--text-light)' }}>{new Date(student.created_at).toLocaleDateString()}</span>
+                          </div>
                         </div>
                       </div>
                       <div className="student-actions">

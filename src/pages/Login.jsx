@@ -45,7 +45,8 @@ export default function Login({ setAttendantSession }) {
       } else {
         const sessionData = { 
           role: 'attendant', id: data.id, unique_id: data.unique_id,
-          org_id: data.org_id, name: data.name || 'Attendant'
+          org_id: data.org_id, name: data.name || 'Attendant',
+          trade: data.trade || 'General'
         };
         localStorage.setItem('attendant_session', JSON.stringify(sessionData));
         setAttendantSession(sessionData);

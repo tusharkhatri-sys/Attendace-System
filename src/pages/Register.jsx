@@ -8,6 +8,8 @@ export default function Register() {
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(false);
   const [orgName, setOrgName] = useState('');
+  const [sessionStart, setSessionStart] = useState('January');
+  const [sessionEnd, setSessionEnd] = useState('December');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -20,7 +22,13 @@ export default function Register() {
     if (password !== confirmPassword) { setError("Passwords do not match."); setLoading(false); return; }
 
     const { data, error: signUpError } = await supabase.auth.signUp({
-      email, password, options: { data: { org_name: orgName } }
+      email, password, options: { 
+        data: { 
+          org_name: orgName, 
+          session_start: sessionStart,
+          session_end: sessionEnd
+        } 
+      }
     });
     
     if (signUpError) { setError(signUpError.message); setLoading(false); return; }
@@ -59,6 +67,27 @@ export default function Register() {
                 <input type="text" className="form-input" style={{ paddingLeft: '2.5rem' }}
                   placeholder="e.g. District Education Office"
                   value={orgName} onChange={(e) => setOrgName(e.target.value)} required />
+              </div>
+            </div>
+            <div className="form-group">
+              <label>Academic Session / Working Period</label>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                <div>
+                  <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Start Month</label>
+                  <select className="form-input" value={sessionStart} onChange={(e) => setSessionStart(e.target.value)}>
+                    {['January','February','March','April','May','June','July','August','September','October','November','December'].map(m => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>End Month</label>
+                  <select className="form-input" value={sessionEnd} onChange={(e) => setSessionEnd(e.target.value)}>
+                    {['January','February','March','April','May','June','July','August','September','October','November','December'].map(m => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                </div>
               </div>
             </div>
             <div className="form-group">

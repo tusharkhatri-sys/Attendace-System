@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { useNavigate } from 'react-router-dom';
-import { LogOut, Users, UserPlus, Trash2, KeyRound, Loader2, Shield, ClipboardList, BarChart3, Download, Calendar, TrendingUp, UserCheck, ChevronLeft, ChevronRight } from 'lucide-react';
+import { LogOut, Users, UserPlus, Trash2, KeyRound, Loader2, Shield, ClipboardList, BarChart3, Download, Calendar, TrendingUp, UserCheck, ChevronLeft, ChevronRight, X } from 'lucide-react';
 
 export default function OrgDashboard({ session }) {
   const navigate = useNavigate();
@@ -10,6 +10,7 @@ export default function OrgDashboard({ session }) {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [newAttendantName, setNewAttendantName] = useState('');
+  const [newAttendantTrade, setNewAttendantTrade] = useState('');
   const [error, setError] = useState(null);
 
   // Analytics
@@ -22,6 +23,20 @@ export default function OrgDashboard({ session }) {
   const [reportDate, setReportDate] = useState(new Date().toISOString().split('T')[0]);
   const [reportData, setReportData] = useState([]);
   const [reportLoading, setReportLoading] = useState(false);
+
+  // Settings
+  const [orgProfile, setOrgProfile] = useState({
+    name: session.user.user_metadata?.org_name || 'Organization',
+    session_start: session.user.user_metadata?.session_start || 'January',
+    session_end: session.user.user_metadata?.session_end || 'December'
+  });
+  const [updatingProfile, setUpdatingProfile] = useState(false);
+
+  // Individual Student History
+  const [selectedStudent, setSelectedStudent] = useState(null);
+  const [studentHistory, setStudentHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [showCalendar, setShowCalendar] = useState(false);
 
   useEffect(() => {
     fetchAttendants();
@@ -46,8 +61,8 @@ export default function OrgDashboard({ session }) {
       const orgId = session.user.id;
 
       // Total students
-      const { count: studentCount } = await supabase
-        .from('students').select('*', { count: 'exact', head: true }).eq('org_id', orgId);
+      const { data: students, count: studentCount } = await supabase
+        .from('students').select('*', { count: 'exact' }).eq('org_id', orgId);
       setTotalStudents(studentCount || 0);
 
       // Today's attendance
@@ -70,27 +85,34 @@ export default function OrgDashboard({ session }) {
         .eq('org_id', orgId)
         .gte('created_at', monthStart.toISOString().split('T')[0] + 'T00:00:00');
 
-      if (studentCount && studentCount > 0 && monthRecords) {
-        // Calculate working days so far this month
-        const now = new Date();
-        let workingDays = 0;
-        for (let d = new Date(monthStart); d <= now; d.setDate(d.getDate() + 1)) {
-          const day = d.getDay();
-          if (day !== 0 && day !== 6) workingDays++;
-        }
-        // Count unique student-day pairs
+      if (students && students.length > 0 && monthRecords) {
+        // Calculate unique student-day pairs
         const uniquePairs = new Set(monthRecords.map(r => {
           const date = r.created_at.split('T')[0];
           return `${r.person_name}_${date}`;
         }));
-        const maxPossible = studentCount * Math.max(workingDays, 1);
-        const pct = Math.round((uniquePairs.size / maxPossible) * 100);
+
+        let totalPossiblePairs = 0;
+        const now = new Date();
+        
+        students.forEach(s => {
+          const regDateStr = new Date(s.created_at).toLocaleDateString('en-CA');
+          const regDate = new Date(regDateStr);
+          const calcStart = regDate > monthStart ? regDate : monthStart;
+          
+          for (let d = new Date(calcStart); d <= now; d.setDate(d.getDate() + 1)) {
+            const day = d.getDay();
+            if (day !== 0 && day !== 6) totalPossiblePairs++;
+          }
+        });
+
+        const pct = totalPossiblePairs > 0 ? Math.round((uniquePairs.size / totalPossiblePairs) * 100) : 0;
         setMonthlyPercent(Math.min(pct, 100));
       }
 
       // Recent Activity (last 10)
       const { data: recent } = await supabase
-        .from('attendance_records').select('person_name, created_at, status')
+        .from('attendance_records').select('person_name, created_at, status, entry_type')
         .eq('org_id', orgId)
         .order('created_at', { ascending: false })
         .limit(10);
@@ -107,7 +129,9 @@ export default function OrgDashboard({ session }) {
 
       // Get all students
       const { data: students } = await supabase
-        .from('students').select('id, name, photo_url').eq('org_id', orgId);
+        .from('students')
+        .select('id, name, photo_url, trade, created_at')
+        .eq('org_id', orgId);
 
       // Get attendance for selected date
       const { data: records } = await supabase
@@ -124,12 +148,24 @@ export default function OrgDashboard({ session }) {
         }
       });
 
-      const report = (students || []).map(s => ({
-        name: s.name,
-        photo_url: s.photo_url,
-        status: presentNames.has(s.name) ? 'Present' : 'Absent',
-        time: timeMap[s.name] || '-'
-      }));
+      const report = (students || [])
+        .filter(s => {
+          const regDate = new Date(s.created_at).toLocaleDateString('en-CA'); // YYYY-MM-DD
+          return reportDate >= regDate; 
+        })
+        .map(s => {
+          const studentRecords = (records || []).filter(r => r.person_name === s.name);
+          const latestRecord = studentRecords[0]; // records are sorted by created_at desc
+
+          return {
+            name: s.name,
+            photo_url: s.photo_url,
+            trade: s.trade || 'General',
+            status: studentRecords.length > 0 ? 'Present' : 'Absent',
+            entry_type: latestRecord ? latestRecord.entry_type : '-',
+            time: latestRecord ? new Date(latestRecord.created_at).toLocaleTimeString() : '-'
+          };
+        });
       
       // Sort: Present first, then Absent
       report.sort((a, b) => a.status === 'Present' ? -1 : 1);
@@ -143,8 +179,8 @@ export default function OrgDashboard({ session }) {
 
   const exportCSV = () => {
     if (reportData.length === 0) return;
-    const headers = ['Name', 'Status', 'Time'];
-    const rows = reportData.map(r => [r.name, r.status, r.time]);
+    const headers = ['Name', 'Trade', 'Status', 'Entry', 'Time'];
+    const rows = reportData.map(r => [r.name, r.trade, r.status, r.entry_type, r.time]);
     const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
@@ -176,9 +212,15 @@ export default function OrgDashboard({ session }) {
     setCreating(true); setError(null);
     try {
       const { data, error } = await supabase.from('attendants')
-        .insert([{ unique_id: generateUniqueId(), name: newAttendantName.trim(), org_id: session.user.id }]).select();
+        .insert([{ 
+          unique_id: generateUniqueId(), 
+          name: newAttendantName.trim(), 
+          trade: newAttendantTrade.trim() || 'General',
+          org_id: session.user.id 
+        }]).select();
       if (error) throw error;
       setNewAttendantName('');
+      setNewAttendantTrade('');
       setAttendants([data[0], ...attendants]);
     } catch (err) { setError('Failed to create attendant.'); }
     finally { setCreating(false); }
@@ -195,6 +237,198 @@ export default function OrgDashboard({ session }) {
 
   const presentCount = reportData.filter(r => r.status === 'Present').length;
   const absentCount = reportData.filter(r => r.status === 'Absent').length;
+
+  const handleUpdateProfile = async (e) => {
+    e.preventDefault();
+    setUpdatingProfile(true);
+    try {
+      const { data: { user }, error: userErr } = await supabase.auth.getUser();
+      if (userErr) throw userErr;
+
+      const { error } = await supabase.auth.updateUser({
+        data: { 
+          org_name: orgProfile.name, 
+          session_start: orgProfile.session_start,
+          session_end: orgProfile.session_end
+        }
+      });
+      if (error) throw error;
+      
+      // Update local state if successful
+      setOrgProfile({
+        name: orgProfile.name,
+        session_start: orgProfile.session_start,
+        session_end: orgProfile.session_end
+      });
+      
+      alert('Profile updated successfully!');
+    } catch (err) {
+      console.error('Update error:', err);
+      alert('Failed to update profile: ' + err.message);
+    } finally {
+      setUpdatingProfile(false);
+    }
+  };
+
+  const handleSyncTrades = async () => {
+    if (!window.confirm("This will attempt to fix students with 'General' trade by matching them with the trade of the attendant who registered them. Continue?")) return;
+    try {
+      const { data: students, error: sErr } = await supabase.from('students').select('id, registered_by').eq('org_id', session.user.id).eq('trade', 'General');
+      if (sErr) throw sErr;
+      
+      let fixed = 0;
+      for (const s of (students || [])) {
+        if (!s.registered_by) continue;
+        const { data: att } = await supabase.from('attendants').select('trade').eq('id', s.registered_by).single();
+        if (att && att.trade) {
+          await supabase.from('students').update({ trade: att.trade }).eq('id', s.id);
+          fixed++;
+        }
+      }
+      alert(`Synchronized ${fixed} students.`);
+      fetchAnalytics();
+    } catch (err) {
+      alert('Sync failed.');
+    }
+  };
+
+  const fetchStudentHistory = async (student) => {
+    setSelectedStudent(student);
+    setHistoryLoading(true);
+    setShowCalendar(true);
+    try {
+      const { data, error } = await supabase
+        .from('attendance_records')
+        .select('*')
+        .eq('person_name', student.name)
+        .eq('org_id', session.user.id)
+        .order('created_at', { ascending: true });
+      if (error) throw error;
+      setStudentHistory(data || []);
+    } catch (err) {
+      alert('Failed to load history.');
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const handleExportStudentCSV = () => {
+    if (!selectedStudent || studentHistory.length === 0) return;
+    
+    let csvContent = "data:text/csv;charset=utf-8,";
+    csvContent += "Date,Time,Status,Entry Type\n";
+    
+    studentHistory.forEach(r => {
+      const date = new Date(r.created_at).toLocaleDateString();
+      const time = new Date(r.created_at).toLocaleTimeString();
+      csvContent += `${date},${time},${r.status},${r.entry_type}\n`;
+    });
+
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `${selectedStudent.name}_attendance.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const StudentCalendarModal = () => {
+    if (!showCalendar || !selectedStudent) return null;
+
+    const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const startMonthName = session?.user?.user_metadata?.session_start || 'January';
+    const startIndex = months.indexOf(startMonthName);
+    
+    // Log for debug
+    console.log("Calendar Debug:", { selectedStudent, startMonthName, startIndex, historyLen: studentHistory.length });
+    
+    // Create ordered months for the 12-month view
+    const orderedMonths = [];
+    for (let i = 0; i < 12; i++) {
+      orderedMonths.push(months[(startIndex + i) % 12]);
+    }
+
+    const getStatusForDay = (dateStr) => {
+      const records = studentHistory.filter(r => r.created_at.startsWith(dateStr));
+      if (records.length > 0) return 'present';
+      
+      if (!selectedStudent?.created_at) return 'absent';
+      const regDate = new Date(selectedStudent.created_at);
+      const regDateStr = regDate.toISOString().split('T')[0];
+      const todayStr = new Date().toISOString().split('T')[0];
+      
+      if (dateStr < regDateStr) return 'not-registered';
+      if (dateStr > todayStr) return 'future';
+      return 'absent';
+    };
+
+    return (
+      <div className="modal-overlay" style={{ background: 'rgba(0,0,0,0.5)', zIndex: 2000 }} onClick={() => setShowCalendar(false)}>
+        <div className="calendar-modal glass-panel" style={{ width: '95%', maxWidth: '1000px', maxHeight: '90vh', overflowY: 'auto', padding: '1.5rem', margin: '2vh auto' }} onClick={e => e.stopPropagation()}>
+          <div className="panel-header">
+            <div>
+              <h2 style={{ fontSize: '1.3rem' }}>🗓️ {selectedStudent.name}'s Attendance</h2>
+              <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Trade: {selectedStudent.trade}</p>
+            </div>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <button className="btn" onClick={handleExportStudentCSV} style={{ background: '#fff', border: '1.2px solid #2563eb', color: '#2563eb', padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}>
+                <Download size={14} /> Export CSV
+              </button>
+              <button className="icon-btn" onClick={() => setShowCalendar(false)}><X size={20} /></button>
+            </div>
+          </div>
+          
+          <div className="calendar-grid-container" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '1.25rem', marginTop: '1.5rem' }}>
+            {orderedMonths.map(monthName => {
+              const monthIdx = months.indexOf(monthName);
+              // Calculate year based on session start
+              const currentYear = new Date().getFullYear();
+              const year = monthIdx < startIndex ? currentYear : currentYear - 1; 
+              const daysInMonth = new Date(year, monthIdx + 1, 0).getDate();
+              
+              return (
+                <div key={monthName} className="month-card" style={{ background: 'var(--surface-light)', borderRadius: '12px', padding: '0.8rem', border: '1px solid var(--surface-border)' }}>
+                  <h4 style={{ fontSize: '0.9rem', marginBottom: '0.75rem', textAlign: 'center', color: 'var(--primary)' }}>{monthName}</h4>
+                  <div className="days-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '4px' }}>
+                    {Array.from({ length: daysInMonth }).map((_, i) => {
+                      const day = i + 1;
+                      const dateStr = `${year}-${String(monthIdx + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                      const status = getStatusForDay(dateStr);
+                      return (
+                        <div key={day} className={`day-cell ${status}`} title={dateStr} style={{ 
+                          aspectRatio: '1', 
+                          display: 'flex', 
+                          alignItems: 'center', 
+                          justifyContent: 'center', 
+                          fontSize: '0.65rem', 
+                          fontWeight: '700', 
+                          borderRadius: '4px',
+                          cursor: 'default',
+                          ...(status === 'present' ? { background: '#22c55e', color: '#fff' } : 
+                             status === 'absent' ? { background: '#ef4444', color: '#fff' } : 
+                             status === 'future' ? { background: '#f3f4f6', color: '#9ca3af' } : 
+                             { background: '#e5e7eb', color: '#9ca3af' })
+                        }}>
+                          {day}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="calendar-legend" style={{ display: 'flex', gap: '1.5rem', marginTop: '1.5rem', padding: '1rem', borderTop: '1px solid var(--surface-border)', justifyContent: 'center' }}>
+            <span style={{ fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}><div style={{ width: '12px', height: '12px', background: '#22c55e', borderRadius: '3px' }}></div> Present</span>
+            <span style={{ fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}><div style={{ width: '12px', height: '12px', background: '#ef4444', borderRadius: '3px' }}></div> Absent</span>
+            <span style={{ fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}><div style={{ width: '12px', height: '12px', background: '#e5e7eb', borderRadius: '3px' }}></div> Not Registered / Holiday / Future</span>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="dashboard-page">
@@ -226,6 +460,10 @@ export default function OrgDashboard({ session }) {
         <button className={`tab-btn ${activeTab === 'attendants' ? 'active' : ''}`}
           onClick={() => setActiveTab('attendants')}>
           <Users size={18} /> Attendants
+        </button>
+        <button className={`tab-btn ${activeTab === 'settings' ? 'active' : ''}`}
+          onClick={() => setActiveTab('settings')}>
+          <KeyRound size={18} /> Settings
         </button>
       </div>
 
@@ -288,7 +526,10 @@ export default function OrgDashboard({ session }) {
                       <h4>{r.person_name}</h4>
                       <span>{new Date(r.created_at).toLocaleString()}</span>
                     </div>
-                    <div className="log-status present">✓ {r.status}</div>
+                    <div className="log-status present">
+                      <span className="status-pill present" style={{ fontSize: '0.65rem', marginRight: '0.5rem' }}>{r.entry_type}</span>
+                      ✓ {r.status}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -345,6 +586,8 @@ export default function OrgDashboard({ session }) {
                 <thead>
                   <tr>
                     <th>Name</th>
+                    <th>Trade</th>
+                    <th>Entry</th>
                     <th>Status</th>
                     <th>Time</th>
                   </tr>
@@ -362,12 +605,25 @@ export default function OrgDashboard({ session }) {
                           <span style={{ fontWeight: '600' }}>{r.name}</span>
                         </div>
                       </td>
+                      <td><span className="status-pill present" style={{ fontSize: '0.75rem' }}>{r.trade}</span></td>
+                      <td>
+                        {r.entry_type !== '-' ? (
+                          <span className={`status-pill ${r.entry_type === 'IN' ? 'present' : 'absent'}`} style={{ background: r.entry_type === 'IN' ? '#f0fdf4' : '#fff7ed', color: r.entry_type === 'IN' ? '#16a34a' : '#ea580c', border: r.entry_type === 'IN' ? '1px solid #bbfcce' : '1px solid #ffedd5' }}>
+                            {r.entry_type}
+                          </span>
+                        ) : '-'}
+                      </td>
                       <td>
                         <span className={r.status === 'Present' ? 'status-pill present' : 'status-pill absent'}>
                           {r.status}
                         </span>
                       </td>
                       <td style={{ color: 'var(--text-muted)' }}>{r.time}</td>
+                      <td>
+                        <button className="icon-btn edit" title="View Student History" onClick={() => fetchStudentHistory(r)}>
+                          <Calendar size={15} />
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -391,7 +647,10 @@ export default function OrgDashboard({ session }) {
               <div className="register-row">
                 <input type="text" className="form-input" placeholder="Attendant Name"
                   value={newAttendantName} onChange={(e) => setNewAttendantName(e.target.value)} required />
-                <button type="submit" className="btn btn-primary capture-btn" disabled={creating}>
+                <input type="text" className="form-input" placeholder="Category / Trade (e.g. COPA)"
+                  value={newAttendantTrade} onChange={(e) => setNewAttendantTrade(e.target.value)} 
+                  style={{ width: 'auto', minWidth: '200px' }} />
+                <button type="submit" className="btn btn-primary capture-btn" disabled={creating} style={{ minWidth: '140px' }}>
                   {creating ? <Loader2 size={18} className="spinner" /> : <UserPlus size={18} />}
                   {creating ? 'Creating...' : 'Generate ID'}
                 </button>
@@ -415,8 +674,11 @@ export default function OrgDashboard({ session }) {
                 {attendants.map(a => (
                   <div key={a.id} className="student-card">
                     <div className="student-info">
-                      <h4>{a.name}</h4>
-                      <span style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                        <h4 style={{ marginBottom: 0 }}>{a.name}</h4>
+                        <span className="status-pill present" style={{ fontSize: '0.7rem', padding: '0.1rem 0.5rem' }}>{a.trade}</span>
+                      </div>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', marginTop: '0.2rem' }}>
                         <KeyRound size={12} />
                         <strong style={{ fontFamily: 'monospace', fontSize: '0.95rem', color: 'var(--primary)', letterSpacing: '1.5px' }}>{a.unique_id}</strong>
                       </span>
@@ -431,6 +693,68 @@ export default function OrgDashboard({ session }) {
           </div>
         </div>
       )}
+
+      {/* ====================== SETTINGS TAB ====================== */}
+      {activeTab === 'settings' && (
+        <div className="dashboard-content">
+          <div className="glass-panel" style={{ padding: '2rem', maxWidth: '600px', margin: '0 auto' }}>
+            <div className="panel-header">
+              <h2>⚙️ Organization Settings</h2>
+            </div>
+            <form onSubmit={handleUpdateProfile} style={{ marginTop: '1.5rem' }}>
+              <div className="form-group">
+                <label>Organization Name</label>
+                <input type="text" className="form-input" value={orgProfile.name} 
+                  onChange={(e) => setOrgProfile({...orgProfile, name: e.target.value})} required />
+              </div>
+              <div className="form-group" style={{ marginTop: '1rem' }}>
+                <label>Academic Session / Working Period</label>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                  <div>
+                    <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Start Month</label>
+                    <select className="form-input" value={orgProfile.session_start} 
+                      onChange={(e) => setOrgProfile({...orgProfile, session_start: e.target.value})}>
+                      {['January','February','March','April','May','June','July','August','September','October','November','December'].map(m => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>End Month</label>
+                    <select className="form-input" value={orgProfile.session_end} 
+                      onChange={(e) => setOrgProfile({...orgProfile, session_end: e.target.value})}>
+                      {['January','February','March','April','May','June','July','August','September','October','November','December'].map(m => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.6rem' }}>
+                  Define your custom attendance cycle (e.g. Feb to Jan).
+                </p>
+              </div>
+              <button type="submit" className="btn btn-primary" disabled={updatingProfile} style={{ marginTop: '1.5rem' }}>
+                {updatingProfile ? <Loader2 size={18} className="spinner" /> : null}
+                Save Settings
+              </button>
+            </form>
+
+            <div className="divider" style={{ margin: '2.5rem 0' }}>Data Maintenance</div>
+            
+            <div style={{ background: 'var(--surface-light)', padding: '1.25rem', borderRadius: '12px', border: '1px solid var(--surface-border)' }}>
+              <h4 style={{ color: '#2563eb', marginBottom: '0.5rem' }}>🛠️ Sync Trade Labels</h4>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem' }}>
+                If students were registered without a trade (appearing as 'General'), use this to fix them based on their registration source.
+              </p>
+              <button className="btn" onClick={handleSyncTrades} style={{ width: 'auto', background: '#fff', border: '1.2px solid #2563eb', color: '#2563eb' }}>
+                Sync All Students
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <StudentCalendarModal />
     </div>
   );
 }
